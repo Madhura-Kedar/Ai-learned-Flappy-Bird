@@ -64,6 +64,13 @@ class Agent:
             epsilon = self.epsilon_init
 
             target_dqn = DQN(num_states, num_actions).to(device)
+
+            # resume from saved model if it exists
+            if os.path.exists(self.MODEL_FILE):
+                print(f"Resuming training from {self.MODEL_FILE}")
+                policy_dqn.load_state_dict(torch.load(self.MODEL_FILE))
+                epsilon = self.epsilon_min  # skip exploration since we already have a good policy
+
             # copy the wt & bias vals from policy => target
             target_dqn.load_state_dict(policy_dqn.state_dict())
 
@@ -84,8 +91,9 @@ class Agent:
 
             episode_reward = 0
             terminated = False
+            truncated = False
 
-            while (not terminated and episode_reward < self.reward_threshold):
+            while (not terminated and not truncated and episode_reward < self.reward_threshold):
                 if is_training and random.random() < epsilon:
                     action = env.action_space.sample() # explore
                     action = torch.tensor(action, dtype=torch.long, device=device)
@@ -93,7 +101,7 @@ class Agent:
                     with torch.no_grad():
                         action = policy_dqn(state.unsqueeze(dim=0)).squeeze().argmax() # exploit
 
-                next_state, reward, terminated, _, _ = env.step(action.item())
+                next_state, reward, terminated, truncated, info = env.step(action.item())
                 
                 episode_reward += reward
 
@@ -105,9 +113,21 @@ class Agent:
                     memory.append((state, action, next_state, reward, terminated))
                     steps += 1
 
+                    # optimize every step
+                    if len(memory) > self.mini_batch_size:
+                        mini_batch = memory.sample(self.mini_batch_size)
+                        self.optimize(mini_batch, policy_dqn, target_dqn)
+
+                    # sync the target network
+                    if steps % self.network_sync_rate == 0:
+                        target_dqn.load_state_dict(policy_dqn.state_dict())
+
                 state = next_state
                 
-            print(f"episode={episode+1} with total reward={episode_reward} & epsilon={epsilon}")
+            if is_training:
+                print(f"episode={episode+1} with total reward={episode_reward} & epsilon={epsilon:.4f}")
+            else:
+                print(f"episode={episode+1} with total reward={episode_reward}")
 
             if is_training:
                 # epsilon decay
@@ -122,17 +142,6 @@ class Agent:
                     torch.save(policy_dqn.state_dict(), self.MODEL_FILE)
                     best_reward = episode_reward
 
-
-            if is_training and len(memory) > self.mini_batch_size:
-                # get sample
-                mini_batch = memory.sample(self.mini_batch_size)
-
-                self.optimize(mini_batch, policy_dqn, target_dqn)
-
-                # sync the network
-                if steps > self.network_sync_rate:
-                    target_dqn.load_state_dict(policy_dqn.state_dict())
-                    steps = 0
 
             # env.close() - manually stop
 
